@@ -3,43 +3,34 @@ require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const { WebClient } = require('@slack/client');
-
 const app = express();
 
 const authToken = process.env.SLACK_AUTH_TOKEN;
 const channelId = process.env.CHANNEL_ID;;
 
-app.use(bodyParser.urlencoded({ extended: true }));
+const sanitiseString = (string) => {
+    const regexQuoteMarks = /(^["'“‘”’]|["'“‘”’]$)/g
+    return string.trim().replace(regexQuoteMarks,"");
+}
+
+const getRecipient = (text) => {
+    const regexSplitUserInfo = /(|)\w+/g;
+    const userInfo = text.split(" ")[0].match(/(|)\w+/g)
+    return { id: userInfo[0], name: userInfo[1] }
+}
 
 const parseMessage = (message) => {
-    console.log('message: ', message)
-    // const senderName = message.user_name
-    // const senderId = message.user_id
-    // console.log('senderName: ', senderName)
-    // console.log('senderId: ', senderId)
-    const regex = /(\@\w*)([\s\S]*)/;
-    const chunks = message.text.match(regex)
-    console.log('chunks: ', chunks)
-    const target = chunks[1];
-    const kudosString = chunks[2];
-    return {target, kudosString};
+    const regexUserInfo = /.*>\s/;
+    const userInfo = message.match(regexUserInfo)
+    const kudosString = message.replace(userInfo, "")
+    return sanitiseString(kudosString);
 };
 
-const egoFilter = (target, sender, client) => {
-    console.log('');
-    console.log('egoFilter');
-    console.log('sender: ', sender);
-   return Boolean(target.slice(1) === sender.name);
+const egoFilter = (recipientId, senderId) => {
+    return Boolean(recipientId === senderId);
 };
 
 const egoExit = (res, sender) => {
-    console.log('');
-    console.log('egoExit');
-    // return client.chat.postMessage(`${sender.id}`, `Sorry <@${sender.name}> you can't send kudos to yourself`, {
-    //     attachments: [{
-    //         text:'But kudos bot thinks you\'re great'
-    //     }]
-    // })
     res.json({
         text: `Sorry <@${sender.name}> you can't send kudos to yourself`,
         attachments: [{
@@ -48,42 +39,46 @@ const egoExit = (res, sender) => {
     })
 }
 
-
-const sendKudos = (client, target, kudosString) => {
-    console.log('sendKudos');
-    return client.chat.postMessage(`${channelId}`, `:tada: Kudos to <${target}> :clap:`, {
+const sendKudos = (client, recipientId, kudosString) => {
+    return client.chat.postMessage(`${channelId}`, `:tada: Kudos to <@${recipientId}> :clap:`, {
         attachments: [{
             text:kudosString
         }]
     })
 };
 
+const inviteToChannel = (client, recipient) => {
+    return client.channels.invite(`${channelId}`, `${recipient}`);
+}
+
+const confirmKudosSent = (res, recipientId, kudosString) => {
+    return () => res.json({
+        text: `Thanks for sending kudos to <@${recipientId}>`,
+        attachments: [{
+            text:`${kudosString}`
+        }]
+    });
+};
+
+app.use(bodyParser.urlencoded({ extended: true }));
+
 app.get('/', (req, res) => { console.log('GET /') || res.send('HELLO WORLD')})
 app.get('/kudos', (req, res) => { console.log('GET /kudos') || res.send('KUDOS')})
 
 app.post('/', (req, res) => {
     const sender = { name: req.body.user_name, id: req.body.user_id }
-    const { target, kudosString } = parseMessage(req.body)
+    const recipient = getRecipient(req.body.text);
+    const kudosString = parseMessage(req.body.text)
     const client = new WebClient(authToken);
-    
-    if(egoFilter(target, sender)) {
+
+    if(egoFilter(recipient.id, sender.id)) {
         egoExit(res, sender)
-        // res.json({
-        //     text: `Sorry <@${sender.name}> you can't send kudos to yourself`,
-        //     attachments: [{
-        //         text:'But kudos bot thinks you\'re great'
-        //     }]
-        // })
     } else {
-        sendKudos(client, target, kudosString)
-        .then(() => console.log('.then') || res.json({
-            text: `Thanks for sending kudos to <${target}>`,
-            attachments: [{
-                text:`${kudosString}`
-            }]
-        }))
+        sendKudos(client, recipient.id, kudosString)
+        .then(inviteToChannel(client, recipient.id))
+        .then(confirmKudosSent(res, recipient.id, kudosString))
         .catch((err) => res.json({text: `Oops, something went wrong: ${err}`}))
-    }
+    };
 
 });
 
